@@ -1,5 +1,6 @@
 import curses
 import time
+import hashlib
 
 class File:
     def __init__(self, name, content=""):
@@ -21,31 +22,58 @@ class Directory:
     def list(self):
         return list(self.contents.keys())
 
-root = Directory("/")
-cwd = root
-path = [root]
+users = {
+    "guest": {"password": None, "home": "/home/guest"},
+    "admin": {"password": hashlib.sha256(b"admin123").hexdigest(), "home": "/home/admin"}
+}
 
-root.add(Directory("home"))
+root = Directory("/")
+home = Directory("home")
+root.add(home)
+home.add(Directory("guest"))
+home.add(Directory("admin"))
 root.add(Directory("etc"))
 root.add(Directory("var"))
-root.get("home").add(Directory("guest"))
 
-import sys
+cwd = root
+path = [root]
+current_user = None
+logged_in = False
+
+def get_home_dir(username):
+    u = users.get(username)
+    if u:
+        parts = u["home"].strip("/").split("/")
+        d = root
+        for p in parts:
+            d = d.get(p)
+            if not d:
+                return root
+        return d
+    return root
 
 def main(stdscr):
     curses.curs_set(1)
     stdscr.clear()
     max_y, max_x = stdscr.getmaxyx()
-    buffer = ["TerminalOS - Type 'help' for commands."]
+    buffer = ["TerminalOS - Login required.", "Username:"]
     input_str = ""
+    global cwd, path, current_user, logged_in
+    login_state = "username"
+    temp_username = ""
     running = True
-    global cwd, path
 
     def draw():
         stdscr.clear()
         for idx, line in enumerate(buffer[-(max_y-3):]):
             stdscr.addstr(idx+1, 2, line[:max_x-4])
-        stdscr.addstr(max_y-2, 2, (f"{get_path()}$ " + input_str)[:max_x-4])
+        if logged_in:
+            stdscr.addstr(max_y-2, 2, (f"{get_path()}$ " + input_str)[:max_x-4])
+        else:
+            if login_state == "password":
+                stdscr.addstr(max_y-2, 2, ("Password: " + "*"*len(input_str))[:max_x-4])
+            else:
+                stdscr.addstr(max_y-2, 2, ("Username: " + input_str)[:max_x-4])
         stdscr.refresh()
 
     def get_path():
@@ -57,6 +85,31 @@ def main(stdscr):
         if key in (curses.KEY_BACKSPACE, 127):
             input_str = input_str[:-1]
         elif key == 10:
+            if not logged_in:
+                if login_state == "username":
+                    temp_username = input_str.strip()
+                    if temp_username in users:
+                        login_state = "password"
+                        buffer.append("Password:")
+                    else:
+                        buffer.append("Invalid username. Username:")
+                    input_str = ""
+                elif login_state == "password":
+                    pw = input_str.strip()
+                    u = users[temp_username]
+                    if u["password"] is None or u["password"] == hashlib.sha256(pw.encode()).hexdigest():
+                        current_user = temp_username
+                        logged_in = True
+                        login_state = "logged_in"
+                        cwd = get_home_dir(current_user)
+                        path = [root, root.get("home"), root.get("home").get(current_user)]
+                        buffer.append(f"Login successful. Welcome, {current_user}!")
+                    else:
+                        buffer.append("Invalid password. Username:")
+                        login_state = "username"
+                    input_str = ""
+                draw()
+                continue
             buffer.append(f"{get_path()}$ " + input_str)
             cmd = input_str.strip()
             parts = cmd.split()
@@ -67,7 +120,7 @@ def main(stdscr):
             c = parts[0]
             args = parts[1:]
             if c == "help":
-                buffer.append("Available: help, clear, exit, ls, cd, mkdir, touch, cat")
+                buffer.append("Available: help, clear, exit, ls, cd, mkdir, touch, cat, whoami, logout")
             elif c == "clear":
                 buffer = []
             elif c == "exit":
@@ -118,6 +171,13 @@ def main(stdscr):
                     buffer.extend(cwd.contents[args[0]].content.splitlines() or [""])
                 else:
                     buffer.append(f"cat: {args[0]}: No such file")
+            elif c == "whoami":
+                buffer.append(current_user)
+            elif c == "logout":
+                logged_in = False
+                current_user = None
+                login_state = "username"
+                buffer.append("Logged out. Username:")
             else:
                 buffer.append(f"Unknown command: {cmd}")
             input_str = ""
