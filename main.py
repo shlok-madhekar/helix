@@ -156,12 +156,12 @@ def get_home_dir(username):
     return root
 
 def main(stdscr):
+    global cwd, path, current_user, logged_in, root
     curses.curs_set(1)
     stdscr.clear()
     max_y, max_x = stdscr.getmaxyx()
     buffer = ["TerminalOS - Login required.", "Username:"]
     input_str = ""
-    global cwd, path, current_user, logged_in
     login_state = "username"
     temp_username = ""
     running = True
@@ -290,7 +290,6 @@ def main(stdscr):
                     buffer.append(f"Save failed: {e}")
             elif c == "load":
                 try:
-                    global root, cwd, path
                     r = load_filesystem()
                     if r:
                         root = r
