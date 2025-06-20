@@ -3,6 +3,7 @@ import time
 import hashlib
 import json
 import os
+import random
 
 class File:
     def __init__(self, name, content=""):
@@ -82,6 +83,65 @@ cwd = root
 path = [root]
 current_user = None
 logged_in = False
+
+class Process:
+    def __init__(self, pid, name, cpu=0.0, mem=0.0, owner="guest"):
+        self.pid = pid
+        self.name = name
+        self.cpu = cpu
+        self.mem = mem
+        self.owner = owner
+
+class ProcessManager:
+    def __init__(self):
+        self.processes = {}
+        self.next_pid = 1000
+        self.init_system()
+    def init_system(self):
+        procs = [
+            (1, "systemd", 0.1, 2.5, "root"),
+            (2, "kthreadd", 0.0, 0.0, "root"),
+            (1234, "terminal-os", 1.2, 15.3, "guest"),
+            (1235, "python3", 2.1, 25.7, "guest")
+        ]
+        for pid, name, cpu, mem, owner in procs:
+            self.processes[pid] = Process(pid, name, cpu, mem, owner)
+    def get_list(self):
+        return list(self.processes.values())
+    def kill(self, pid):
+        if pid in self.processes and pid > 100:
+            del self.processes[pid]
+            return True
+        return False
+
+class PackageManager:
+    def __init__(self):
+        self.installed = {"coreutils": "8.32", "nano": "5.4"}
+        self.available = {
+            "cowsay": "3.04",
+            "figlet": "2.2.5",
+            "fortune": "1.99.1",
+            "htop": "3.0.5",
+            "vim": "8.2",
+            "emacs": "27.2",
+            "git": "2.34.1",
+            "python3": "3.9.7",
+            "nodejs": "16.13.0"
+        }
+    def install(self, name):
+        if name in self.available:
+            self.installed[name] = self.available[name]
+            return True, self.available[name]
+        return False, None
+    def list_installed(self):
+        return self.installed
+    def list_available(self):
+        return self.available
+    def is_installed(self, name):
+        return name in self.installed
+
+procman = ProcessManager()
+pkgman = PackageManager()
 
 def get_home_dir(username):
     u = users.get(username)
@@ -163,7 +223,7 @@ def main(stdscr):
             c = parts[0]
             args = parts[1:]
             if c == "help":
-                buffer.append("Available: help, clear, exit, ls, cd, mkdir, touch, cat, whoami, logout, save, load")
+                buffer.append("Available: help, clear, exit, ls, cd, mkdir, touch, cat, whoami, logout, save, load, ps, kill, top, pkg")
             elif c == "clear":
                 buffer = []
             elif c == "exit":
@@ -245,6 +305,51 @@ def main(stdscr):
                         buffer.append("User data loaded.")
                 except Exception as e:
                     buffer.append(f"Load failed: {e}")
+            elif c == "ps":
+                procs = procman.get_list()
+                buffer.append("  PID USER     CPU  MEM COMMAND")
+                for p in sorted(procs, key=lambda x: x.pid):
+                    buffer.append(f"{p.pid:5} {p.owner:8} {p.cpu:4.1f} {p.mem:4.1f} {p.name}")
+            elif c == "kill":
+                if not args:
+                    buffer.append("kill: missing process ID")
+                else:
+                    try:
+                        pid = int(args[0])
+                        if procman.kill(pid):
+                            buffer.append(f"Process {pid} killed")
+                        else:
+                            buffer.append(f"kill: ({pid}) - No such process")
+                    except Exception:
+                        buffer.append("kill: invalid process ID")
+            elif c == "top":
+                procs = procman.get_list()
+                buffer.append("  PID USER     CPU  MEM COMMAND")
+                for p in sorted(procs, key=lambda x: -x.cpu)[:10]:
+                    buffer.append(f"{p.pid:5} {p.owner:8} {p.cpu:4.1f} {p.mem:4.1f} {p.name}")
+            elif c == "pkg":
+                if not args:
+                    buffer.append("Usage: pkg [install|list|available] [package]")
+                elif args[0] == "install":
+                    if len(args) > 1:
+                        ok, ver = pkgman.install(args[1])
+                        if ok:
+                            buffer.append(f"Installed {args[1]} {ver}")
+                        else:
+                            buffer.append(f"pkg: package '{args[1]}' not found")
+                    else:
+                        buffer.append("pkg install: missing package name")
+                elif args[0] == "list":
+                    inst = pkgman.list_installed()
+                    buffer.append("Installed packages:")
+                    for k, v in inst.items():
+                        buffer.append(f"  {k} {v}")
+                elif args[0] == "available":
+                    avail = pkgman.list_available()
+                    buffer.append("Available packages:")
+                    for k, v in avail.items():
+                        if not pkgman.is_installed(k):
+                            buffer.append(f"  {k} {v}")
             else:
                 buffer.append(f"Unknown command: {cmd}")
             input_str = ""
