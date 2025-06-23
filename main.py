@@ -79,11 +79,6 @@ loaded_users = load_users()
 if loaded_users:
     users.update(loaded_users)
 
-cwd = root
-path = [root]
-current_user = None
-logged_in = False
-
 class Process:
     def __init__(self, pid, name, cpu=0.0, mem=0.0, owner="guest"):
         self.pid = pid
@@ -155,205 +150,229 @@ def get_home_dir(username):
         return d
     return root
 
+class TerminalWindow:
+    def __init__(self, id):
+        self.id = id
+        self.buffer = ["TerminalOS - Login required.", "Username:"]
+        self.input_str = ""
+        self.cwd = root
+        self.path = [root]
+        self.current_user = None
+        self.logged_in = False
+        self.login_state = "username"
+        self.temp_username = ""
+
+windows = [TerminalWindow(0)]
+current_window = 0
+
 def main(stdscr):
-    global cwd, path, current_user, logged_in, root
+    global root
     curses.curs_set(1)
     stdscr.clear()
     max_y, max_x = stdscr.getmaxyx()
-    buffer = ["TerminalOS - Login required.", "Username:"]
-    input_str = ""
-    login_state = "username"
-    temp_username = ""
+    global current_window
     running = True
 
     def draw():
         stdscr.clear()
-        for idx, line in enumerate(buffer[-(max_y-3):]):
+        win = windows[current_window]
+        for idx, line in enumerate(win.buffer[-(max_y-3):]):
             stdscr.addstr(idx+1, 2, line[:max_x-4])
-        if logged_in:
-            stdscr.addstr(max_y-2, 2, (f"{get_path()}$ " + input_str)[:max_x-4])
+        if win.logged_in:
+            stdscr.addstr(max_y-2, 2, (f"{get_path(win)}$ " + win.input_str)[:max_x-4])
         else:
-            if login_state == "password":
-                stdscr.addstr(max_y-2, 2, ("Password: " + "*"*len(input_str))[:max_x-4])
+            if win.login_state == "password":
+                stdscr.addstr(max_y-2, 2, ("Password: " + "*"*len(win.input_str))[:max_x-4])
             else:
-                stdscr.addstr(max_y-2, 2, ("Username: " + input_str)[:max_x-4])
+                stdscr.addstr(max_y-2, 2, ("Username: " + win.input_str)[:max_x-4])
+        status = f"Win {current_window+1}/{len(windows)}"
+        stdscr.addstr(0, max_x-len(status)-2, status)
         stdscr.refresh()
 
-    def get_path():
-        return "/" + "/".join(d.name for d in path[1:])
+    def get_path(win):
+        return "/" + "/".join(d.name for d in win.path[1:])
 
     draw()
     while running:
         key = stdscr.getch()
+        win = windows[current_window]
         if key in (curses.KEY_BACKSPACE, 127):
-            input_str = input_str[:-1]
+            win.input_str = win.input_str[:-1]
         elif key == 10:
-            if not logged_in:
-                if login_state == "username":
-                    temp_username = input_str.strip()
-                    if temp_username in users:
-                        login_state = "password"
-                        buffer.append("Password:")
+            if not win.logged_in:
+                if win.login_state == "username":
+                    win.temp_username = win.input_str.strip()
+                    if win.temp_username in users:
+                        win.login_state = "password"
+                        win.buffer.append("Password:")
                     else:
-                        buffer.append("Invalid username. Username:")
-                    input_str = ""
-                elif login_state == "password":
-                    pw = input_str.strip()
-                    u = users[temp_username]
+                        win.buffer.append("Invalid username. Username:")
+                    win.input_str = ""
+                elif win.login_state == "password":
+                    pw = win.input_str.strip()
+                    u = users[win.temp_username]
                     if u["password"] is None or u["password"] == hashlib.sha256(pw.encode()).hexdigest():
-                        current_user = temp_username
-                        logged_in = True
-                        login_state = "logged_in"
-                        cwd = get_home_dir(current_user)
-                        path = [root, root.get("home"), root.get("home").get(current_user)]
-                        buffer.append(f"Login successful. Welcome, {current_user}!")
+                        win.current_user = win.temp_username
+                        win.logged_in = True
+                        win.login_state = "logged_in"
+                        win.cwd = get_home_dir(win.current_user)
+                        win.path = [root, root.get("home"), root.get("home").get(win.current_user)]
+                        win.buffer.append(f"Login successful. Welcome, {win.current_user}!")
                     else:
-                        buffer.append("Invalid password. Username:")
-                        login_state = "username"
-                    input_str = ""
+                        win.buffer.append("Invalid password. Username:")
+                        win.login_state = "username"
+                    win.input_str = ""
                 draw()
                 continue
-            buffer.append(f"{get_path()}$ " + input_str)
-            cmd = input_str.strip()
+            win.buffer.append(f"{get_path(win)}$ " + win.input_str)
+            cmd = win.input_str.strip()
             parts = cmd.split()
             if not parts:
-                input_str = ""
+                win.input_str = ""
                 draw()
                 continue
             c = parts[0]
             args = parts[1:]
             if c == "help":
-                buffer.append("Available: help, clear, exit, ls, cd, mkdir, touch, cat, whoami, logout, save, load, ps, kill, top, pkg")
+                win.buffer.append("Available: help, clear, exit, ls, cd, mkdir, touch, cat, whoami, logout, save, load, ps, kill, top, pkg")
             elif c == "clear":
-                buffer = []
+                win.buffer = []
             elif c == "exit":
-                buffer.append("Exiting TerminalOS...")
+                win.buffer.append("Exiting TerminalOS...")
                 draw()
                 time.sleep(1)
+                running = False
                 break
             elif c == "ls":
-                items = cwd.list()
+                items = win.cwd.list()
                 if not items:
-                    buffer.append("")
+                    win.buffer.append("")
                 else:
-                    buffer.append("  ".join(sorted(items)))
+                    win.buffer.append("  ".join(sorted(items)))
             elif c == "cd":
                 if not args:
-                    input_str = ""
+                    win.input_str = ""
                     draw()
                     continue
                 if args[0] == "..":
-                    if len(path) > 1:
-                        path.pop()
-                        cwd = path[-1]
-                elif args[0] in cwd.contents and isinstance(cwd.contents[args[0]], Directory):
-                    cwd = cwd.contents[args[0]]
-                    path.append(cwd)
+                    if len(win.path) > 1:
+                        win.path.pop()
+                        win.cwd = win.path[-1]
+                elif args[0] in win.cwd.contents and isinstance(win.cwd.contents[args[0]], Directory):
+                    win.cwd = win.cwd.contents[args[0]]
+                    win.path.append(win.cwd)
                 else:
-                    buffer.append(f"cd: no such directory: {args[0]}")
+                    win.buffer.append(f"cd: no such directory: {args[0]}")
             elif c == "mkdir":
                 if not args:
-                    buffer.append("mkdir: missing operand")
-                elif args[0] in cwd.contents:
-                    buffer.append(f"mkdir: cannot create directory '{args[0]}': File exists")
+                    win.buffer.append("mkdir: missing operand")
+                elif args[0] in win.cwd.contents:
+                    win.buffer.append(f"mkdir: cannot create directory '{args[0]}': File exists")
                 else:
-                    cwd.add(Directory(args[0]))
+                    win.cwd.add(Directory(args[0]))
             elif c == "touch":
                 if not args:
-                    buffer.append("touch: missing file operand")
-                elif args[0] in cwd.contents:
-                    obj = cwd.contents[args[0]]
+                    win.buffer.append("touch: missing file operand")
+                elif args[0] in win.cwd.contents:
+                    obj = win.cwd.contents[args[0]]
                     if isinstance(obj, File):
                         obj.size = len(obj.content)
                 else:
-                    cwd.add(File(args[0], ""))
+                    win.cwd.add(File(args[0], ""))
             elif c == "cat":
                 if not args:
-                    buffer.append("cat: missing file operand")
-                elif args[0] in cwd.contents and isinstance(cwd.contents[args[0]], File):
-                    buffer.extend(cwd.contents[args[0]].content.splitlines() or [""])
+                    win.buffer.append("cat: missing file operand")
+                elif args[0] in win.cwd.contents and isinstance(win.cwd.contents[args[0]], File):
+                    win.buffer.extend(win.cwd.contents[args[0]].content.splitlines() or [""])
                 else:
-                    buffer.append(f"cat: {args[0]}: No such file")
+                    win.buffer.append(f"cat: {args[0]}: No such file")
             elif c == "whoami":
-                buffer.append(current_user)
+                win.buffer.append(win.current_user)
             elif c == "logout":
-                logged_in = False
-                current_user = None
-                login_state = "username"
-                buffer.append("Logged out. Username:")
+                win.logged_in = False
+                win.current_user = None
+                win.login_state = "username"
+                win.buffer.append("Logged out. Username:")
             elif c == "save":
                 try:
                     save_filesystem(root)
                     save_users(users)
-                    buffer.append("System state saved.")
+                    win.buffer.append("System state saved.")
                 except Exception as e:
-                    buffer.append(f"Save failed: {e}")
+                    win.buffer.append(f"Save failed: {e}")
             elif c == "load":
                 try:
                     r = load_filesystem()
                     if r:
                         root = r
                         home = root.get("home")
-                        cwd = get_home_dir(current_user) if current_user else root
-                        path = [root, root.get("home"), root.get("home").get(current_user)] if current_user else [root]
-                        buffer.append("Filesystem loaded.")
+                        win.cwd = get_home_dir(win.current_user) if win.current_user else root
+                        win.path = [root, root.get("home"), root.get("home").get(win.current_user)] if win.current_user else [root]
+                        win.buffer.append("Filesystem loaded.")
                     u = load_users()
                     if u:
                         users.clear()
                         users.update(u)
-                        buffer.append("User data loaded.")
+                        win.buffer.append("User data loaded.")
                 except Exception as e:
-                    buffer.append(f"Load failed: {e}")
+                    win.buffer.append(f"Load failed: {e}")
             elif c == "ps":
                 procs = procman.get_list()
-                buffer.append("  PID USER     CPU  MEM COMMAND")
+                win.buffer.append("  PID USER     CPU  MEM COMMAND")
                 for p in sorted(procs, key=lambda x: x.pid):
-                    buffer.append(f"{p.pid:5} {p.owner:8} {p.cpu:4.1f} {p.mem:4.1f} {p.name}")
+                    win.buffer.append(f"{p.pid:5} {p.owner:8} {p.cpu:4.1f} {p.mem:4.1f} {p.name}")
             elif c == "kill":
                 if not args:
-                    buffer.append("kill: missing process ID")
+                    win.buffer.append("kill: missing process ID")
                 else:
                     try:
                         pid = int(args[0])
                         if procman.kill(pid):
-                            buffer.append(f"Process {pid} killed")
+                            win.buffer.append(f"Process {pid} killed")
                         else:
-                            buffer.append(f"kill: ({pid}) - No such process")
+                            win.buffer.append(f"kill: ({pid}) - No such process")
                     except Exception:
-                        buffer.append("kill: invalid process ID")
+                        win.buffer.append("kill: invalid process ID")
             elif c == "top":
                 procs = procman.get_list()
-                buffer.append("  PID USER     CPU  MEM COMMAND")
+                win.buffer.append("  PID USER     CPU  MEM COMMAND")
                 for p in sorted(procs, key=lambda x: -x.cpu)[:10]:
-                    buffer.append(f"{p.pid:5} {p.owner:8} {p.cpu:4.1f} {p.mem:4.1f} {p.name}")
+                    win.buffer.append(f"{p.pid:5} {p.owner:8} {p.cpu:4.1f} {p.mem:4.1f} {p.name}")
             elif c == "pkg":
                 if not args:
-                    buffer.append("Usage: pkg [install|list|available] [package]")
+                    win.buffer.append("Usage: pkg [install|list|available] [package]")
                 elif args[0] == "install":
                     if len(args) > 1:
                         ok, ver = pkgman.install(args[1])
                         if ok:
-                            buffer.append(f"Installed {args[1]} {ver}")
+                            win.buffer.append(f"Installed {args[1]} {ver}")
                         else:
-                            buffer.append(f"pkg: package '{args[1]}' not found")
+                            win.buffer.append(f"pkg: package '{args[1]}' not found")
                     else:
-                        buffer.append("pkg install: missing package name")
+                        win.buffer.append("pkg install: missing package name")
                 elif args[0] == "list":
                     inst = pkgman.list_installed()
-                    buffer.append("Installed packages:")
+                    win.buffer.append("Installed packages:")
                     for k, v in inst.items():
-                        buffer.append(f"  {k} {v}")
+                        win.buffer.append(f"  {k} {v}")
                 elif args[0] == "available":
                     avail = pkgman.list_available()
-                    buffer.append("Available packages:")
+                    win.buffer.append("Available packages:")
                     for k, v in avail.items():
                         if not pkgman.is_installed(k):
-                            buffer.append(f"  {k} {v}")
+                            win.buffer.append(f"  {k} {v}")
             else:
-                buffer.append(f"Unknown command: {cmd}")
-            input_str = ""
+                win.buffer.append(f"Unknown command: {cmd}")
+            win.input_str = ""
+        elif key == curses.KEY_F2:
+            windows.append(TerminalWindow(len(windows)))
+            current_window = len(windows) - 1
+        elif key == curses.KEY_F1:
+            current_window = (current_window - 1) % len(windows)
+        elif key == curses.KEY_F3:
+            current_window = (current_window + 1) % len(windows)
         elif 0 <= key <= 255:
-            input_str += chr(key)
+            win.input_str += chr(key)
         draw()
 
 if __name__ == "__main__":
