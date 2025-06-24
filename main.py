@@ -211,6 +211,7 @@ def is_root(username):
     return users.get(username, {}).get("uid", 1000) == 0
 
 def main(stdscr):
+    global root
     curses.curs_set(1)
     stdscr.clear()
     max_y, max_x = stdscr.getmaxyx()
@@ -413,7 +414,7 @@ def handle_command(cmd, win):
             output.append(f"Save failed: {e}")
     elif c == "load":
         try:
-            global root
+            
             r = load_filesystem()
             if r:
                 root = r
