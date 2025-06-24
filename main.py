@@ -135,20 +135,42 @@ class PackageManager:
     def is_installed(self, name):
         return name in self.installed
 
+class MountManager:
+    def __init__(self):
+        self.mounts = {
+            "/": {"device": "/dev/sda1", "type": "ext4", "mounted": True},
+            "/home": {"device": "/dev/sda2", "type": "ext4", "mounted": True}
+        }
+        self.available_devices = {
+            "usb1": {"path": "/media/usb1", "file": "usb1.tos", "mounted": False},
+            "usb2": {"path": "/media/usb2", "file": "usb2.tos", "mounted": False}
+        }
+    def mount_device(self, device):
+        if device in self.available_devices and not self.available_devices[device]["mounted"]:
+            self.available_devices[device]["mounted"] = True
+            mount_point = self.available_devices[device]["path"]
+            self.mounts[mount_point] = {
+                "device": f"/dev/{device}",
+                "type": "vfat",
+                "mounted": True
+            }
+            return True, mount_point
+        return False, None
+    def unmount_device(self, device):
+        if device in self.available_devices and self.available_devices[device]["mounted"]:
+            self.available_devices[device]["mounted"] = False
+            mount_point = self.available_devices[device]["path"]
+            if mount_point in self.mounts:
+                del self.mounts[mount_point]
+            return True
+        return False
+
 procman = ProcessManager()
 pkgman = PackageManager()
+mountman = MountManager()
 
-def get_home_dir(username):
-    u = users.get(username)
-    if u:
-        parts = u["home"].strip("/").split("/")
-        d = root
-        for p in parts:
-            d = d.get(p)
-            if not d:
-                return root
-        return d
-    return root
+network_up = True
+ip_address = "192.168.1.100"
 
 class TerminalWindow:
     def __init__(self, id):
@@ -165,12 +187,24 @@ class TerminalWindow:
 windows = [TerminalWindow(0)]
 current_window = 0
 
+def get_home_dir(username):
+    u = users.get(username)
+    if u:
+        parts = u["home"].strip("/").split("/")
+        d = root
+        for p in parts:
+            d = d.get(p)
+            if not d:
+                return root
+        return d
+    return root
+
 def main(stdscr):
     global root
     curses.curs_set(1)
     stdscr.clear()
     max_y, max_x = stdscr.getmaxyx()
-    global current_window
+    global current_window, network_up
     running = True
 
     def draw():
@@ -234,7 +268,7 @@ def main(stdscr):
             c = parts[0]
             args = parts[1:]
             if c == "help":
-                win.buffer.append("Available: help, clear, exit, ls, cd, mkdir, touch, cat, whoami, logout, save, load, ps, kill, top, pkg")
+                win.buffer.append("Available: help, clear, exit, ls, cd, mkdir, touch, cat, whoami, logout, save, load, ps, kill, top, pkg, ping, ifconfig, curl, mount, umount")
             elif c == "clear":
                 win.buffer = []
             elif c == "exit":
@@ -361,6 +395,61 @@ def main(stdscr):
                     for k, v in avail.items():
                         if not pkgman.is_installed(k):
                             win.buffer.append(f"  {k} {v}")
+            elif c == "ping":
+                if not args:
+                    win.buffer.append("ping: missing destination")
+                elif not network_up:
+                    win.buffer.append(f"ping: {args[0]}: Network is unreachable")
+                else:
+                    target = args[0]
+                    win.buffer.append(f"PING {target} (192.168.1.{random.randint(1,254)}) 56(84) bytes of data.")
+                    win.buffer.append(f"64 bytes from {target}: icmp_seq=1 ttl=64 time={random.randint(1,50)}ms")
+                    win.buffer.append(f"64 bytes from {target}: icmp_seq=2 ttl=64 time={random.randint(1,50)}ms")
+                    win.buffer.append("--- ping statistics ---")
+                    win.buffer.append("2 packets transmitted, 2 received, 0% packet loss")
+            elif c == "ifconfig":
+                if network_up:
+                    win.buffer.append("eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500")
+                    win.buffer.append(f"        inet {ip_address}  netmask 255.255.255.0  broadcast 192.168.1.255")
+                    win.buffer.append("        inet6 fe80::a00:27ff:fe4e:66a1  prefixlen 64  scopeid 0x20<link>")
+                    win.buffer.append("        ether 08:00:27:4e:66:a1  txqueuelen 1000  (Ethernet)")
+                    win.buffer.append("        RX packets 1234  bytes 567890 (554.5 KiB)")
+                    win.buffer.append("        TX packets 987  bytes 123456 (120.5 KiB)")
+                else:
+                    win.buffer.append("Network interface down")
+            elif c == "curl":
+                if not args:
+                    win.buffer.append("curl: missing URL")
+                elif not network_up:
+                    win.buffer.append("curl: Network is unreachable")
+                else:
+                    url = args[0]
+                    win.buffer.append(f"Connecting to {url}...")
+                    win.buffer.append("HTTP/1.1 200 OK")
+                    win.buffer.append("Content-Type: text/html")
+                    win.buffer.append("")
+                    win.buffer.append("<html><body><h1>Fake webpage content</h1></body></html>")
+            elif c == "mount":
+                if not args:
+                    win.buffer.append("Mounted filesystems:")
+                    for mount_point, info in mountman.mounts.items():
+                        win.buffer.append(f"{info['device']} on {mount_point} type {info['type']}")
+                else:
+                    device = args[0]
+                    success, mount_point = mountman.mount_device(device)
+                    if success:
+                        win.buffer.append(f"Mounted {device} at {mount_point}")
+                    else:
+                        win.buffer.append(f"mount: cannot mount {device}")
+            elif c == "umount":
+                if not args:
+                    win.buffer.append("umount: missing device")
+                else:
+                    device = args[0]
+                    if mountman.unmount_device(device):
+                        win.buffer.append(f"Unmounted {device}")
+                    else:
+                        win.buffer.append(f"umount: {device} not mounted")
             else:
                 win.buffer.append(f"Unknown command: {cmd}")
             win.input_str = ""
@@ -371,6 +460,9 @@ def main(stdscr):
             current_window = (current_window - 1) % len(windows)
         elif key == curses.KEY_F3:
             current_window = (current_window + 1) % len(windows)
+        elif key == curses.KEY_F5:
+            network_up = not network_up
+            win.buffer.append(f"Network: {'UP' if network_up else 'DOWN'}")
         elif 0 <= key <= 255:
             win.input_str += chr(key)
         draw()
