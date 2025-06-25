@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import random
+import re
 
 class File:
     def __init__(self, name, content="", owner="guest", mode=644):
@@ -18,12 +19,39 @@ class File:
     def from_dict(data):
         return File(data["name"], data.get("content", ""), data.get("owner", "guest"), data.get("mode", 644))
 
+class Symlink:
+    def __init__(self, name, target, owner="guest", mode=777):
+        self.name = name
+        self.target = target  # Path string
+        self.owner = owner
+        self.mode = mode
+    def to_dict(self):
+        return {"type": "symlink", "name": self.name, "target": self.target, "owner": self.owner, "mode": self.mode}
+    @staticmethod
+    def from_dict(data):
+        return Symlink(data["name"], data["target"], data.get("owner", "guest"), data.get("mode", 777))
+
+class Hardlink:
+    def __init__(self, name, target_file, owner="guest", mode=644):
+        self.name = name
+        self.target_file = target_file  # Reference to File object
+        self.owner = owner
+        self.mode = mode
+    def to_dict(self):
+        return {"type": "hardlink", "name": self.name, "target": self.target_file.name, "owner": self.owner, "mode": self.mode}
+    @staticmethod
+    def from_dict(data, directory):
+        # Find the file in the directory by name
+        target = directory.get(data["target"])
+        return Hardlink(data["name"], target, data.get("owner", "guest"), data.get("mode", 644))
+
 class Directory:
-    def __init__(self, name, owner="guest", mode=755):
+    def __init__(self, name, owner="guest", mode=755, max_size=None):
         self.name = name
         self.contents = {}
         self.owner = owner
         self.mode = mode
+        self.max_size = max_size  # in bytes, None means unlimited
     def add(self, obj):
         self.contents[obj.name] = obj
     def get(self, name):
@@ -31,16 +59,40 @@ class Directory:
     def list(self):
         return list(self.contents.keys())
     def to_dict(self):
-        return {"type": "dir", "name": self.name, "contents": {k: v.to_dict() for k, v in self.contents.items()}, "owner": self.owner, "mode": self.mode}
+        return {"type": "dir", "name": self.name, "contents": {k: v.to_dict() for k, v in self.contents.items()}, "owner": self.owner, "mode": self.mode, "max_size": self.max_size}
     @staticmethod
     def from_dict(data):
-        d = Directory(data["name"], data.get("owner", "guest"), data.get("mode", 755))
+        d = Directory(data["name"], data.get("owner", "guest"), data.get("mode", 755), data.get("max_size"))
         for k, v in data.get("contents", {}).items():
             if v["type"] == "file":
                 d.add(File.from_dict(v))
-            else:
+            elif v["type"] == "dir":
                 d.add(Directory.from_dict(v))
+            elif v["type"] == "symlink":
+                d.add(Symlink.from_dict(v))
+            elif v["type"] == "hardlink":
+                pass
+        for k, v in data.get("contents", {}).items():
+            if v["type"] == "hardlink":
+                d.add(Hardlink.from_dict(v, d))
         return d
+    def get_size(self, seen=None):
+        if seen is None:
+            seen = set()
+        size = 0
+        for obj in self.contents.values():
+            if isinstance(obj, File):
+                if id(obj) not in seen:
+                    size += obj.size
+                    seen.add(id(obj))
+            elif isinstance(obj, Directory):
+                size += obj.get_size(seen)
+            elif isinstance(obj, Hardlink):
+                if id(obj.target_file) not in seen:
+                    size += obj.target_file.size
+                    seen.add(id(obj.target_file))
+            # Symlinks do not add to disk usage (just a pointer)
+        return size
 
 def save_filesystem(root):
     with open("filesystem.tos", "w") as f:
@@ -69,8 +121,8 @@ users = {
 
 root = load_filesystem()
 if not root:
-    root = Directory("/")
-    home = Directory("home")
+    root = Directory("/", max_size=1024*1024)  # 1MB
+    home = Directory("home", max_size=512*1024)  # 512KB
     root.add(home)
     home.add(Directory("guest"))
     home.add(Directory("admin"))
@@ -191,6 +243,8 @@ class TerminalWindow:
         self.sudo_timestamp = 0
         self.command_history = []
         self.history_index = -1
+        self.help_active = False
+        self.help_scroll_offset = 0
 
 windows = [TerminalWindow(0)]
 current_window = 0
@@ -210,6 +264,44 @@ def get_home_dir(username):
 def is_root(username):
     return users.get(username, {}).get("uid", 1000) == 0
 
+def parse_symbolic_chmod(symbolic, current_mode):
+    # Only supports u/g/o/a, +-=, and rwx
+    mode = current_mode
+    for clause in symbolic.split(","):
+        m = re.match(r"([ugoa]*)([+-=])([rwx]+)", clause)
+        if not m:
+            continue
+        who, op, perms = m.groups()
+        if not who:
+            who = "a"
+        for w in who:
+            for p in perms:
+                shift = {"u": 6, "g": 3, "o": 0}[w] if w in "ugo" else None
+                if w == "a":
+                    for subw in "ugo":
+                        shift = {"u": 6, "g": 3, "o": 0}[subw]
+                        bit = {"r": 4, "w": 2, "x": 1}[p] << shift
+                        if op == "+":
+                            mode |= bit
+                        elif op == "-":
+                            mode &= ~bit
+                        elif op == "=":
+                            # Clear then set
+                            mask = 7 << shift
+                            mode &= ~mask
+                            mode |= {"r": 4, "w": 2, "x": 1}[p] << shift
+                else:
+                    bit = {"r": 4, "w": 2, "x": 1}[p] << shift
+                    if op == "+":
+                        mode |= bit
+                    elif op == "-":
+                        mode &= ~bit
+                    elif op == "=":
+                        mask = 7 << shift
+                        mode &= ~mask
+                        mode |= {"r": 4, "w": 2, "x": 1}[p] << shift
+    return mode
+
 def main(stdscr):
     global root
     curses.curs_set(1)
@@ -221,6 +313,46 @@ def main(stdscr):
     def draw():
         stdscr.clear()
         win = windows[current_window]
+        if win.help_active:
+            help_lines = [
+                "Available commands:",
+                "help",
+                "clear",
+                "exit",
+                "ls",
+                "cd",
+                "mkdir",
+                "touch",
+                "cat",
+                "whoami",
+                "logout",
+                "save",
+                "load",
+                "ps",
+                "kill",
+                "top",
+                "pkg",
+                "ping",
+                "ifconfig",
+                "curl",
+                "mount",
+                "umount",
+                "chmod",
+                "chown",
+                "sudo",
+                "df",
+                "du",
+                "ln"
+            ]
+            start = win.help_scroll_offset
+            end = min(start + max_y - 3, len(help_lines))
+            for idx, line in enumerate(help_lines[start:end]):
+                stdscr.addstr(idx+1, 2, line[:max_x-4])
+            stdscr.addstr(max_y-2, 2, "(UP/DOWN to scroll, any key to exit help)")
+            status = f"Win {current_window+1}/{len(windows)}"
+            stdscr.addstr(0, max_x-len(status)-2, status)
+            stdscr.refresh()
+            return
         for idx, line in enumerate(win.buffer[-(max_y-3):]):
             stdscr.addstr(idx+1, 2, line[:max_x-4])
         if win.logged_in:
@@ -247,7 +379,20 @@ def main(stdscr):
     while running:
         key = stdscr.getch()
         win = windows[current_window]
-        if key in (curses.KEY_BACKSPACE, 127):
+        if win.help_active:
+            if key == curses.KEY_UP:
+                if win.help_scroll_offset > 0:
+                    win.help_scroll_offset -= 1
+            elif key == curses.KEY_DOWN:
+                help_lines = 25  # number of help lines
+                if win.help_scroll_offset < help_lines - (max_y - 3):
+                    win.help_scroll_offset += 1
+            else:
+                win.help_active = False
+                win.help_scroll_offset = 0
+            draw()
+            continue
+        elif key in (curses.KEY_BACKSPACE, 127):
             win.input_str = win.input_str[:-1]
         elif key == 9:
             if win.logged_in:
@@ -325,6 +470,11 @@ def main(stdscr):
                 win.input_str = ""
                 draw()
                 continue
+            if c == "help":
+                win.help_active = True
+                win.help_scroll_offset = 0
+                draw()
+                continue
             result = handle_command(cmd, win)
             win.buffer.extend(result)
             win.input_str = ""
@@ -342,7 +492,35 @@ def main(stdscr):
             win.input_str += chr(key)
         draw()
 
+def resolve_obj(obj, cwd):
+    # Resolves symlinks recursively, returns the final object
+    seen = set()
+    while isinstance(obj, Symlink):
+        if obj.target.startswith("/"):
+            # Absolute path
+            parts = obj.target.strip("/").split("/")
+            d = root
+        else:
+            # Relative path
+            d = cwd
+            parts = obj.target.split("/")
+        for p in parts:
+            if isinstance(d, Directory):
+                d = d.get(p)
+            else:
+                d = None
+            if d is None:
+                break
+        obj = d
+        if id(obj) in seen:
+            break  # Prevent infinite loop
+        seen.add(id(obj))
+    if isinstance(obj, Hardlink):
+        return obj.target_file
+    return obj
+
 def handle_command(cmd, win):
+    global root, home
     parts = cmd.strip().split()
     if not parts:
         return []
@@ -360,7 +538,28 @@ def handle_command(cmd, win):
         if not items:
             output.append("")
         else:
-            output.append("  ".join(sorted(items)))
+            # Show type and permissions
+            def permstr(obj):
+                if isinstance(obj, Directory):
+                    t = 'd'
+                elif isinstance(obj, Symlink):
+                    t = 'l'
+                elif isinstance(obj, Hardlink):
+                    t = 'h'
+                else:
+                    t = '-'
+                m = obj.mode if hasattr(obj, 'mode') else 0o777
+                perms = ''.join([('r' if m & (1<<8-i*3) else '-') + ('w' if m & (1<<7-i*3) else '-') + ('x' if m & (1<<6-i*3) else '-') for i in range(3)])
+                return t + perms
+            lines = []
+            for k in sorted(items):
+                obj = win.cwd.contents[k]
+                pstr = permstr(obj)
+                if isinstance(obj, Symlink):
+                    lines.append(f"{pstr} {obj.owner:8} {k} -> {obj.target}")
+                else:
+                    lines.append(f"{pstr} {obj.owner:8} {k}")
+            output.extend(lines)
     elif c == "cd":
         if not args:
             return []
@@ -394,8 +593,12 @@ def handle_command(cmd, win):
     elif c == "cat":
         if not args:
             output.append("cat: missing file operand")
-        elif args[0] in win.cwd.contents and isinstance(win.cwd.contents[args[0]], File):
-            output.extend(win.cwd.contents[args[0]].content.splitlines() or [""])
+        elif args[0] in win.cwd.contents:
+            obj = resolve_obj(win.cwd.contents[args[0]], win.cwd)
+            if isinstance(obj, File):
+                output.extend(obj.content.splitlines() or [""])
+            else:
+                output.append(f"cat: {args[0]}: Not a file")
         else:
             output.append(f"cat: {args[0]}: No such file")
     elif c == "whoami":
@@ -414,7 +617,6 @@ def handle_command(cmd, win):
             output.append(f"Save failed: {e}")
     elif c == "load":
         try:
-            
             r = load_filesystem()
             if r:
                 root = r
@@ -534,10 +736,13 @@ def handle_command(cmd, win):
             mode = args[0]
             filename = args[1]
             if filename in win.cwd.contents:
-                obj = win.cwd.contents[filename]
+                obj = resolve_obj(win.cwd.contents[filename], win.cwd)
                 try:
-                    obj.mode = int(mode, 8)
-                    output.append(f"Changed permissions of '{filename}' to {mode}")
+                    if re.match(r"^[0-7]{3,4}$", mode):
+                        obj.mode = int(mode, 8)
+                    else:
+                        obj.mode = parse_symbolic_chmod(mode, getattr(obj, 'mode', 0o644))
+                    output.append(f"Changed permissions of '{filename}' to {oct(obj.mode)[2:]}")
                 except Exception:
                     output.append(f"chmod: invalid mode: {mode}")
             else:
@@ -549,13 +754,63 @@ def handle_command(cmd, win):
             owner = args[0]
             filename = args[1]
             if filename in win.cwd.contents:
-                obj = win.cwd.contents[filename]
+                obj = resolve_obj(win.cwd.contents[filename], win.cwd)
                 obj.owner = owner
                 output.append(f"Changed ownership of '{filename}' to {owner}")
             else:
                 output.append(f"chown: cannot access '{filename}': No such file or directory")
         else:
             output.append("chown: missing operand")
+    elif c == "df":
+        # Show disk usage for each mount (simulate only root and home for now)
+        mounts = [("/", root), ("/home", root.get("home"))]
+        output.append("Filesystem   Size     Used    Avail   Use%  Mounted on")
+        for mnt, d in mounts:
+            if d and d.max_size:
+                used = d.get_size()
+                size = d.max_size
+                avail = size - used
+                usep = int(used/size*100) if size else 0
+                output.append(f"fakefs      {size//1024}K   {used//1024}K   {avail//1024}K   {usep}%   {mnt}")
+    elif c == "du":
+        # Show disk usage for current dir or given dir
+        def du_dir(d, path, seen=None):
+            if seen is None:
+                seen = set()
+            size = d.get_size(seen)
+            lines = [f"{size} {path}"]
+            for obj in d.contents.values():
+                if isinstance(obj, Directory):
+                    lines += du_dir(obj, os.path.join(path, obj.name), seen)
+            return lines
+        target = win.cwd
+        path = "/" + "/".join(d.name for d in win.path[1:])
+        if args and args[0] in win.cwd.contents and isinstance(win.cwd.contents[args[0]], Directory):
+            target = win.cwd.contents[args[0]]
+            path = os.path.join(path, args[0])
+        output += du_dir(target, path)
+    elif c == "ln":
+        if not args or len(args) < 2:
+            output.append("Usage: ln [-s] target linkname")
+        elif args[0] == "-s":
+            # Symlink
+            if len(args) < 3:
+                output.append("Usage: ln -s target linkname")
+            else:
+                target, linkname = args[1], args[2]
+                if linkname in win.cwd.contents:
+                    output.append(f"ln: failed to create symlink '{linkname}': File exists")
+                else:
+                    win.cwd.add(Symlink(linkname, target, win.current_user))
+        else:
+            # Hardlink
+            target, linkname = args[0], args[1]
+            if linkname in win.cwd.contents:
+                output.append(f"ln: failed to create hard link '{linkname}': File exists")
+            elif target not in win.cwd.contents or not isinstance(win.cwd.contents[target], File):
+                output.append(f"ln: failed to access '{target}': No such file")
+            else:
+                win.cwd.add(Hardlink(linkname, win.cwd.contents[target], win.current_user))
     else:
         output.append(f"Unknown command: {cmd}")
     return output
